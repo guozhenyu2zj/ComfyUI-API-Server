@@ -11,10 +11,17 @@ from tasks import (
     process_multiple_face_swap_fast,
     process_multiple_face_desensitization,
     process_multiple_face_swap,
-    process_multiple_face_desensitization_auto
+    process_multiple_face_desensitization_auto,
+    process_face_swap_auto
 )
 from enum import Enum
+from collections import deque
+import time
 
+task_cost = {"face_swap_auto": 40, "image_upscale": 40, "multi_face_desensitization_auto": 120}
+task_funcs = {}
+tasks = {}
+current_connection = None
 class TaskType:
     FaceSwap = "face_swap"
     FaceDesensitization = "face_desensitization"
@@ -26,115 +33,178 @@ class TaskType:
     MultiFaceDesensitization = "multi_face_desensitization"
     MultiFaceSwap = "multi_face_swap"
     MultiFaceDesensitizationAuto = "multi_face_desensitization_auto"
+    FaceSwapAuto = "face_swap_auto"
 
-tasks = {}
-current_connection = None
+class TaskStatus:
+    WAITING = "waiting"
+    RUNNING = "running"
+    SUCCESSFUL = "successful"
+    FAILED = "failed"
 
-def create_by_task_id(task_id, task_type, content):
-    try:
-        if task_type == TaskType.FaceSwap:
-            print(content)
-            task = process_face_swap.delay(**content)
-            print("face swap")
-        elif task_type == TaskType.FaceDesensitization:
-            print(content)
-            task = process_face_desensitization.delay(**content)
-            print("face desensitization")
-        elif task_type == TaskType.FaceDesensitizationThumbnail:
-            print(content)
-            task = process_face_desensitization_thumbnail.delay(**content)
-            print("face desensitization thumbnail")
-        elif task_type == TaskType.FaceSwapThumbnail:
-            print(content)
-            task = process_face_swap_thumbnail.delay(**content)
-            print("face swap thumbnail")
-        elif task_type == TaskType.ImageUpscale:
-            print(content)
-            task = process_image_upscale.delay(**content)
-            print("image upscale")
-        elif task_type == TaskType.MultiFaceDesensitizationFast:
-            print(content)
-            task = process_multiple_face_desensitization_fast.delay(**content)
-            print("multi face desensitization fast")
-        elif task_type == TaskType.MultiFaceSwapFast:
-            print(content)
-            task = process_multiple_face_swap_fast.delay(**content)
-            print("multi face swap fast")
-        elif task_type == TaskType.MultiFaceDesensitization:
-            print(content)
-            task = process_multiple_face_desensitization.delay(**content)
-            print("multi face desensitization")
-        elif task_type == TaskType.MultiFaceSwap:
-            print(content)
-            task = process_multiple_face_swap.delay(**content)
-            print("multi face swap")
-        elif task_type == TaskType.MultiFaceDesensitizationAuto:
-            print(content)
-            task = process_multiple_face_desensitization_auto.delay(**content)
-            print("multi face desensitization")
+
+class PhotoTask:
+    def __init__(self, task_id: str, task_type: TaskType, task_para: dict):
+        self.task_id = task_id
+        self.task_type = task_type
+        self.task_para = task_para
+        self.cost_time = task_cost[task_type]
+        self.task_status = TaskStatus.WAITING
+        self.waiting_time = -1
+        self.result = {}
+
+class TaskQueue:
+    def __init__(self, websocket):
+        self.main_queue = asyncio.Queue()
+        self.sub_queue_list = []
+        self.face_swap_auto_queue = asyncio.Queue()
+        self.face_swap_auto_list = deque()
+        self.face_swap_auto_start_time = -1
+        self.sub_queue_list.append(self.face_swap_auto_list)
+        self.multi_face_desensitization_auto_queue = asyncio.Queue()
+        self.multi_face_desensitization_auto_list = deque()
+        self.multi_face_desensitization_auto_start_time = -1
+        self.sub_queue_list.append(self.multi_face_desensitization_auto_list)
+        self.image_upscale_queue = asyncio.Queue()
+        self.image_upscale_list = deque()
+        self.image_upscale_start_time = -1
+        self.sub_queue_list.append(self.image_upscale_list)
+        self.cost_time = [35, 45, 45]
+        self.start_time = [time.time(), time.time(), time.time()]
+        self.websocket = websocket
+        self.task_dict = {}
         
-        task_result = task.get()
-        print(task_result)
-        
-        msg = {"task_id": task_id,
-               "result": {"processed": "completed",
-                          "task_type": task_type,
-                          "processed_result": {"url": task_result["url"],
-                                               "file_path": task_result["file_path"],
-                                               "comfyui_task_id": task_result["task_id"]}}}
-    except Exception as e:
-        msg = {"task_id": task_id,
-               "result": {"processed": "failed",
-                          "task_type": task_type,
-                          "processed_result": f'{e}'}}
-    
-    return msg
+    def run(self):
+        asyncio.create_task(self.task_dispatcher())
+        asyncio.create_task(self.handle_face_swap_auto())
+        asyncio.create_task(self.handle_multi_face_desensitization_auto())
+        asyncio.create_task(self.handle_image_upscale())
+        asyncio.create_task(self.update_waiting_time())
 
-def query_by_task_id(task_id, task_type, content):
-    if task_id in tasks:
-        task = tasks[task_id]
-        task_type = task["type"]
-        task_result = task["result"]
-        if task_result.ready():
-            msg = {"task_id": task_id,
-                   "result": {"processed": "completed",
-                              "task_type": task_type,
-                              "processed_result": {"url": task_result["url"],
-                                                   "file_path": task_result["file_path"],
-                                                   "comfyui_task_id": task_result["task_id"]}}}
-        else:
-            msg = {"task_id": task_id,
-                   "result": {"processed": "processing",
-                              "task_type": task_type,
-                              "processed_result": ""}}
-    else:
-        msg = {"task_id": task_id,
-               "result": {"processed": "failed",
-                          "task_type": task_type,
-                          "processed_result": "Query failed."}}
-    return msg
-  
+    async def process_task(self, task):
+        try:
+            if task.task_type == TaskType.FaceSwapAuto:
+                task.status = TaskStatus.RUNNING
+                result = process_face_swap_auto.delay(**task.task_para)
+                self.face_swap_auto_start_time = time.time()
+                self.start_time[0] = self.face_swap_auto_start_time
+            elif task.task_type == TaskType.MultiFaceDesensitizationAuto:
+                task.status = TaskStatus.RUNNING
+                result = process_multiple_face_desensitization_auto.delay(**task.task_para)
+                self.multi_face_desensitization_auto_start_time = time.time()
+                self.start_time[1] = self.multi_face_desensitization_auto_start_time
+            elif task.task_type == TaskType.ImageUpscale:
+                task.status = TaskStatus.RUNNING
+                result = process_image_upscale.delay(**task.task_para)
+                self.image_upscale_start_time = time.time()
+                self.start_time[2] = self.image_upscale_start_time
+            else:
+                raise ValueError("Unknown task type")
+            
+            task_result = result.get()
+            print(task_result)
+            processed_result = {"url": task_result["url"],
+                                "file_path": task_result["file_path"],
+                                "comfyui_task_id": task_result["task_id"]}
+            
+            task.task_status = TaskStatus.SUCCESSFUL
+            task.result = processed_result
+            
+            msg = {"task_id": task.task_id,
+                "result": {"processed": task.task_status,
+                            "task_type": task.task_type,
+                            "processed_result": task.result}}
 
-async def async_task_create(websocket, task_id, task_type, content):
-    print("Starting async task")
-    create_result = await asyncio.to_thread(create_by_task_id, 
-                                            task_id=task_id, 
-                                            task_type=task_type,
-                                            content=content)
-    print(create_result)
-    await websocket.send(json.dumps(create_result))
+        except Exception as e:
+            task.task_status = TaskStatus.FAILED
+            task.result = f'{e}'
+
+            msg = {"task_id": task.task_id,
+               "result": {"processed": task.task_status,
+                          "task_type": task.task_type,
+                          "processed_result": task.result}}
+        return msg
     
-async def async_task_query(websocket, task_id, task_type, content):
-    print("Querying task")
-    try:
-        query_result = await asyncio.to_thread(query_by_task_id,
-                                               task_id=task_id,
-                                               task_type=task_type,
-                                               content=content)
-        await websocket.send(json.dumps(query_result))
-    except Exception as e:
-        error_message = json.dumps({'error': str(e)})
-        await websocket.send(error_message)
+    async def update_waiting_time(self):
+        length = len(self.sub_queue_list)
+        while True:
+            for i in range(length):
+                sub_queue = self.sub_queue_list[i]
+                cost = self.cost_time[i]
+                rest_time = cost - (time.time() - self.start_time[i])
+                waiting_time = rest_time if rest_time > 0 else 0
+                for task in sub_queue:
+                    task.waiting_time = waiting_time
+                    waiting_time += cost
+            await asyncio.sleep(5)
+
+    async def handle_face_swap_auto(self):
+        while True:
+            task = await self.face_swap_auto_queue.get()
+            self.face_swap_auto_list.popleft()
+            task.waiting_time = 0
+            if task:
+                result = await self.process_task(task)
+                print(result)
+                self.face_swap_auto_queue.task_done()
+                await self.websocket.send(json.dumps(result))
+    
+    async def handle_multi_face_desensitization_auto(self):
+        while True:
+            task = await self.multi_face_desensitization_auto_queue.get()
+            self.multi_face_desensitization_auto_list.popleft()
+            task.waiting_time = 0
+            if task:
+                result = await self.process_task(task)
+                print(result)
+                self.multi_face_desensitization_auto_queue.task_done()
+                await self.websocket.send(json.dumps(result))
+    
+    async def handle_image_upscale(self):
+        while True:
+            task = await self.image_upscale_queue.get()
+            self.image_upscale_list.popleft()
+            task.waiting_time = 0
+            if task:
+                result = await self.process_task(task)
+                print(result)
+                self.image_upscale_queue.task_done()
+                await self.websocket.send(json.dumps(result))
+
+    async def task_dispatcher(self):
+        while True:
+            task = await self.main_queue.get()
+            if task:
+                if task.task_type == TaskType.FaceSwapAuto:
+                    await self.face_swap_auto_queue.put(task)
+                    self.face_swap_auto_list.append(task)
+                elif task.task_type == TaskType.MultiFaceDesensitizationAuto:
+                    print(TaskType.MultiFaceDesensitizationAuto)
+                    await self.multi_face_desensitization_auto_queue.put(task)
+                    self.multi_face_desensitization_auto_list.append(task)
+                elif task.task_type == TaskType.ImageUpscale:
+                    await self.image_upscale_queue.put(task)
+                    self.image_upscale_list.append(task)
+                self.main_queue.task_done()
+
+    
+    async def add_task(self, task: PhotoTask):
+        await self.main_queue.put(task)
+        self.task_dict[task.task_id] = task
+
+    async def query_task(self, task_id):
+        task_dict = self.task_dict
+        if task_id in task_dict:
+            task = task_dict[task_id]
+            task_type = task.task_type
+            task_status = task.task_status
+            task_waiting_time = task.waiting_time
+            task_result = task.result
+            msg = {"task_id": task_id,
+                   "result":{"task_type": task_type,
+                             "task_status": task_status,
+                             "task_waiting_time": task_waiting_time,
+                             "task_result": task_result}}
+            await self.websocket.send(json.dumps(msg))
 
 # 定义 WebSocket 处理函数
 async def handle_client(websocket):
@@ -143,50 +213,33 @@ async def handle_client(websocket):
     # 允许当前连接
     current_connection = websocket
     print("Client connected.")
-
-    try:
-        while True:
-            # 接收客户端发来的消息（假设是 JSON 格式的字符串）
-            message = await websocket.recv()
+    
+    task_queue = TaskQueue(websocket=websocket)
+    task_queue.run()
+    print("ok")
+    # try:
+    while True:
+        # 接收客户端发来的消息（假设是 JSON 格式的字符串）
+        message = await websocket.recv()
+        
+        # 将接收到的 JSON 字符串转换为字典
+        data = json.loads(message)
+        print(data)
+        
+        task_id = data["task_id"]
+        task_type = data["task_type"]
+        content = data["content"]
+        
+        task = PhotoTask(task_id=task_id, task_type=task_type, task_para=content)
+        await task_queue.add_task(task)
             
-            # 将接收到的 JSON 字符串转换为字典
-            data = json.loads(message)
-            print(data)
-            
-            task_id = data["task_id"]
-            task_type = data["task_type"]
-            content = data["content"]
-            
-            if task_type == TaskType.FaceSwap:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.FaceDesensitization:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.FaceDesensitizationThumbnail:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.FaceSwapThumbnail:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.ImageUpscale:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.MultiFaceDesensitizationFast:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.MultiFaceSwapFast:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.MultiFaceDesensitization:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.MultiFaceSwap:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == TaskType.MultiFaceDesensitizationAuto:
-                asyncio.create_task(async_task_create(websocket, task_id, task_type, content))
-            elif task_type == "query":
-                asyncio.create_task(async_task_query(websocket, task_id, task_type, content))
-            
-    except Exception as e:
-        # 处理异常并发送错误消息
-        error_message = json.dumps({'error': str(e)})
-        await websocket.send(error_message)
-    finally:
-        # 断开连接后清理当前连接
-        current_connection = None
+    # except Exception as e:
+    #     # 处理异常并发送错误消息
+    #     error_message = json.dumps({'error': str(e)})
+    #     await websocket.send(error_message)
+    # finally:
+    #     # 断开连接后清理当前连接
+    #     current_connection = None
 
 # 启动 WebSocket 服务器
 async def main():
