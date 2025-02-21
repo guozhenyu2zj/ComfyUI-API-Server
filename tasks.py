@@ -9,6 +9,7 @@ app = Celery('tasks',
 
 app.conf.update(
     task_routes = {
+        'tasks.test': {'queue': 'test'},
         'tasks.process_face_swap': {'queue': 'face_swap'},
         'tasks.process_face_swap_thumbnail': {'queue': 'face_swap_thumbnail'},
         'tasks.process_image_upscale': {'queue': 'image_upscale'},
@@ -20,6 +21,7 @@ app.conf.update(
         'tasks.process_multiple_face_swap': {'queue': 'multi_face_swap'},
         'tasks.process_multiple_face_desensitization_auto': {'queue': 'multi_face_desensitization_auto'},
         'tasks.process_face_swap_auto': {'queue': 'face_swap_auto'},
+        'tasks.process_multiple_face_desensitization_auto_xly': {'queue': 'multi_face_desensitization_auto_xly'},
     },
 )
 
@@ -50,6 +52,10 @@ app.conf.timezone = 'Asia/Shanghai'
 #     if status != 0:
 #         raise ValueError(result["message"])
 #     return result
+
+@app.task
+def test():
+    pass
 
 @app.task
 def process_face_desensitization_thumbnail(image_path, **kwargs):
@@ -93,8 +99,18 @@ def process_multiple_face_swap(image_path, face_image_path, order, **kwargs):
 
 @app.task
 def process_multiple_face_desensitization_auto(image_path, **kwargs):
+    # time.sleep(120)
+    # msg = {'task_id': '86b22c5a-bddf-4b8b-a664-3145ef8757d9', 'task_type': 'multi_face_desensitization_auto', 'content': {'image_path': 'https://img.sw.gz.cn/photography-comfyui/user_1/20250113/094725_076b99615d8b48d9974beb25859b105f.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=KoIWIjPxYDm3YfmzJ2r6%2F20250113%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20250113T014809Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=d06b4b56186f5ad98868484a97ccc0e38130e6ba85c0e97d56226dfd3e57e6bb'}}
+    # return msg
+    pass
+    
+@app.task
+def process_face_swap_auto(image_path, face_image_path, **kwargs):
     pass
 
 @app.task
-def process_face_swap_auto(image_path, face_image_path, **kwargs):
+def process_multiple_face_desensitization_auto_xly(image_path, **kwargs):
+    # time.sleep(120)
+    # msg = {'task_id': '86b22c5a-bddf-4b8b-a664-3145ef8757d9', 'task_type': 'multi_face_desensitization_auto', 'content': {'image_path': 'https://img.sw.gz.cn/photography-comfyui/user_1/20250113/094725_076b99615d8b48d9974beb25859b105f.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=KoIWIjPxYDm3YfmzJ2r6%2F20250113%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20250113T014809Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=d06b4b56186f5ad98868484a97ccc0e38130e6ba85c0e97d56226dfd3e57e6bb'}}
+    # return msg
     pass
