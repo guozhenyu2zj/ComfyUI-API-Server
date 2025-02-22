@@ -27,6 +27,7 @@ from fastapi import APIRouter
 import uvicorn
 
 app = FastAPI()
+task_queue = None
 
 task_cost = {"face_swap_auto": 40,
              "image_upscale": 40,
@@ -114,7 +115,7 @@ class TaskQueue:
     def test_task(self):
         result = test.delay()
         msg = result.get(timeout=10)
-        self.websocket.send_text(msg)
+        asyncio.run(self.websocket.send_text(msg))
 
     def process_task(self, task_id):
         print("3090")
@@ -182,7 +183,8 @@ class TaskQueue:
             task = self.task_dict[task_id]
             task_cost_time = task_cost[task.task_type]
             waiting_time += task_cost_time
-            task.waiting_time = waiting_time if waiting_time > 0 else 0
+            waiting_time = waiting_time if waiting_time > 0 else 0
+            task.waiting_time = waiting_time
             print(f'task:{task.task_id} left {task.waiting_time} waiting time.')
     
     async def update_task_dict(self):
@@ -217,9 +219,9 @@ class TaskQueue:
                                             "cost_time": task.cost_time,
                                             "task_type": task.task_type,
                                             "processed_result": task.result}}
-                    await self.websocket.send(json.dumps(start_msg))
+                    await self.websocket.send_text(json.dumps(start_msg))
                     
-                    status, result = await asyncio.to_thread(self.process_task, task_id)
+                    status, result = await asyncio.to_thread(self.process_task, task_id)    
                     
                     if status == TaskStatus.SUCCESSFUL:
                         task.task_status = TaskStatus.SUCCESSFUL
@@ -238,7 +240,7 @@ class TaskQueue:
                                             "cost_time": task.cost_time,
                                             "task_type": task.task_type,
                                             "processed_result": task.result}}
-                    await self.websocket.send(json.dumps(msg))
+                    await self.websocket.send_text(json.dumps(msg))
             except Exception as e:
                 print(f'{e}')
                 
@@ -260,7 +262,7 @@ class TaskQueue:
                                             "cost_time": task.cost_time,
                                             "task_type": task.task_type,
                                             "processed_result": task.result}}
-                    await self.websocket.send(json.dumps(start_msg))
+                    await self.websocket.send_text(json.dumps(start_msg))
                     
                     status, result = await asyncio.to_thread(self.process_task_xly, task_id)
                     
@@ -281,7 +283,7 @@ class TaskQueue:
                                             "cost_time": task.cost_time,
                                             "task_type": task.task_type,
                                             "processed_result": task.result}}
-                    await self.websocket.send(json.dumps(msg))
+                    await self.websocket.send_text(json.dumps(msg))
             except Exception as e:
                 print(f'{e}')
 
@@ -329,7 +331,7 @@ class TaskQueue:
                                     "cost_time": task.cost_time,
                                     "task_type": task.task_type,
                                     "processed_result": task.result}}
-        await self.websocket.send(json.dumps(commit_msg))
+        await self.websocket.send_text(json.dumps(commit_msg))
 
     async def query_task(self, task_id):
         try:
@@ -342,11 +344,17 @@ class TaskQueue:
                                             "task_type": task.task_type,
                                             "processed_result": task.result}}
                 print(msg)
-                await self.websocket.send(json.dumps(msg))
+                return msg
             else:
                 msg = {"task_id": task_id, "error": "Invalid task id."}
                 print(msg)
-                await self.websocket.send(json.dumps(msg))
+                return msg
+        except Exception as e:
+                print(f'{e}')
+
+    async def cancel_task(self, task_id):
+        try:
+            pass
         except Exception as e:
                 print(f'{e}')
 
@@ -390,12 +398,23 @@ class TaskQueue:
 #         error_response = {"error": "Unexpected error occurred"}
 #         # await websocket.send(json.dumps(error_response))
 
+@app.get("/query")
+async def read_root(task_id):
+    global task_queue
+    msg = await task_queue.query_task(task_id)
+    return JSONResponse(content=msg)
+
+@app.get("/cancel")
+async def read_root(task_id):
+    global task_queue
+    msg = await task_queue.cancel_task(task_id)
+    return JSONResponse(content=msg)
 
 # 处理每个客户端连接
-@app.websocket("/ws")
+@app.websocket("/")
 async def handle_client(websocket: WebSocket):
     await websocket.accept()
-    
+    global task_queue
     task_queue = TaskQueue(websocket=websocket)
     task_queue.run()
     
@@ -425,4 +444,4 @@ async def handle_client(websocket: WebSocket):
             break  # 客户端正常关闭连接
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=38765)
+    uvicorn.run(app, host="0.0.0.0", port=38765)

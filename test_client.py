@@ -3,7 +3,7 @@ import websockets
 import json
 
 async def websocket_client():
-    uri = "ws://localhost:38765/ws"  # 连接到 FastAPI 服务器的 WebSocket 地址
+    uri = "ws://39.107.101.110:38765"  # 连接到 FastAPI 服务器的 WebSocket 地址
     async with websockets.connect(uri) as websocket:
         while True:
             # 发送消息到服务器
